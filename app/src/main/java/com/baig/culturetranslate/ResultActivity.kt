@@ -1,124 +1,115 @@
 package com.baig.culturetranslate
 
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.tts.TextToSpeech
+import android.util.Log
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import okhttp3.Call
-import okhttp3.Callback
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
 import org.json.JSONObject
-import java.io.IOException
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
 import java.util.Locale
 
-class ResultActivity : AppCompatActivity() {
+class ResultActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
-    private val client = OkHttpClient()
-    private var tts: TextToSpeech? = null
-    private var currentTranslatedText = ""
+    private lateinit var tts: TextToSpeech
+    private var translatedText: String = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_result)
 
-        // 1. Find the views on the screen
-        val tvTranslatedPhrase = findViewById<TextView>(R.id.tvTranslatedPhrase)
-        val tvCultureTip = findViewById<TextView>(R.id.tvCultureTip)
-        val btnHome = findViewById<Button>(R.id.btnHome)
-        val btnSpeak = findViewById<Button>(R.id.btnSpeak)
+        tts = TextToSpeech(this, this)
 
-        // 2. Get the data passed from the previous screen
+        val tvResult = findViewById<TextView>(R.id.tvResult)
+        val tvCultureTip = findViewById<TextView>(R.id.tvCultureTip)
+        val btnSpeak = findViewById<Button>(R.id.btnSpeak)
+        val btnGoBack = findViewById<Button>(R.id.btnGoBack)
+
         val phrase = intent.getStringExtra("EXTRA_PHRASE") ?: ""
         val country = intent.getStringExtra("EXTRA_COUNTRY") ?: ""
 
-        // 3. Set the cultural tip immediately
-        setCultureTipText(country, tvCultureTip)
+        tvResult.text = "Translating..."
 
-        // 4. Fetch the translated text from the API
-        fetchTranslation(phrase, country, tvTranslatedPhrase)
-
-        // 5. Initialize Text-To-Speech safely
-        tts = TextToSpeech(this) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                tts?.language = Locale.US
+        // Call the translation API in the background
+        translateText(phrase, country) { resultText ->
+            translatedText = resultText
+            runOnUiThread {
+                tvResult.text = translatedText
             }
         }
 
-        // 6. Speak Button Action
+        tvCultureTip.text = "Culture Tip: When traveling to $country, it helps to learn a few basic local phrases. Research local customs before arrival!"
+
         btnSpeak.setOnClickListener {
-            if (currentTranslatedText.isNotEmpty() && tts != null) {
-                tts!!.speak(currentTranslatedText, TextToSpeech.QUEUE_FLUSH, null, null)
-            } else {
-                Toast.makeText(this, "Translation is still loading or TTS is not ready.", Toast.LENGTH_SHORT).show()
-            }
+            speakOut()
         }
 
-        // 7. Back button logic to return to input screen
-        btnHome.setOnClickListener {
+        btnGoBack.setOnClickListener {
             finish()
         }
     }
 
-    private fun fetchTranslation(textToTranslate: String, targetCountry: String, textView: TextView) {
-        val targetLanguage = when (targetCountry.lowercase()) {
-            "japan" -> "ja"
-            "france" -> "fr"
-            "spain" -> "es"
-            "germany" -> "de"
+    private fun translateText(text: String, country: String, callback: (String) -> Unit) {
+        val targetLang = when (country) {
+            "Spain" -> "es"
+            "France" -> "fr"
+            "Japan" -> "ja"
+            "Germany" -> "de"
             else -> "en"
         }
 
-        val url = "https://api.mymemory.translated.net/get?q=$textToTranslate&langpair=en|$targetLanguage"
-        val request = Request.Builder().url(url).build()
+        Thread {
+            try {
+                val encodedText = URLEncoder.encode(text, "UTF-8")
+                val urlString = "https://api.mymemory.translated.net/get?q=$encodedText&langpair=en|$targetLang"
+                val url = URL(urlString)
+                val connection = url.openConnection() as HttpURLConnection
+                connection.requestMethod = "GET"
 
-        client.newCall(request).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                runOnUiThread {
-                    currentTranslatedText = textToTranslate
-                    textView.text = "${targetCountry.replaceFirstChar { it.uppercase() }}: $textToTranslate"
-                    Toast.makeText(this@ResultActivity, "Network error. Showing original text.", Toast.LENGTH_SHORT).show()
+                val reader = BufferedReader(InputStreamReader(connection.inputStream))
+                val response = StringBuilder()
+                var line: String?
+                while (reader.readLine().also { line = it } != null) {
+                    response.append(line)
                 }
-            }
+                reader.close()
 
-            override fun onResponse(call: Call, response: Response) {
-                try {
-                    val responseData = response.body?.string()
-                    val json = JSONObject(responseData)
-                    val translatedText = json.getJSONObject("responseData").getString("translatedText")
+                val jsonResponse = JSONObject(response.toString())
+                val responseData = jsonResponse.getJSONObject("responseData")
+                val translated = responseData.getString("translatedText")
 
-                    runOnUiThread {
-                        currentTranslatedText = translatedText
-                        textView.text = "${targetCountry.replaceFirstChar { it.uppercase() }}: $translatedText"
-                    }
-                } catch (e: Exception) {
-                    runOnUiThread {
-                        currentTranslatedText = textToTranslate
-                        textView.text = "${targetCountry.replaceFirstChar { it.uppercase() }}: $textToTranslate"
-                    }
-                }
+                callback(translated)
+            } catch (e: Exception) {
+                Log.e("TranslationError", e.message.toString())
+                callback(text)
             }
-        })
+        }.start()
     }
 
-    private fun setCultureTipText(country: String, textView: TextView) {
-        val cultureTipText = when (country.lowercase()) {
-            "japan" -> "Culture Tip: Bowing is standard in Japan. Deeper bows show more respect to elders or business partners."
-            "france" -> "Culture Tip: Always say 'Bonjour' before asking a question in a French shop. It's considered very rude not to!"
-            "spain" -> "Culture Tip: Locals enjoy late lunches (2 PM - 4 PM) and dinner around 9 PM or 10 PM."
-            "germany" -> "Culture Tip: Punctuality is highly valued. If you are running 5 minutes late, it is polite to inform them."
-            else -> "Culture Tip: When traveling to $country, it helps to learn a few basic local phrases. Research local customs before arrival!"
+    private fun speakOut() {
+        if (translatedText.isNotEmpty()) {
+            tts.speak(translatedText, TextToSpeech.QUEUE_FLUSH, null, "")
         }
-        textView.text = cultureTipText
+    }
+
+    override fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) {
+            tts.setLanguage(Locale.US)
+        }
     }
 
     override fun onDestroy() {
-        if (tts != null) {
-            tts!!.stop()
-            tts!!.shutdown()
+        if (::tts.isInitialized) {
+            tts.stop()
+            tts.shutdown()
         }
         super.onDestroy()
     }
